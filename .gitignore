@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+
+# Mac
+.DS_Store
+
+# Research data
+data/
+data_int/
+
+# Trained models
+*.pth
+
+# Generated results
+loss/
+attention/
+*.png
+
+# Experiment results
+hyperparameter_results_PFOS.csv
