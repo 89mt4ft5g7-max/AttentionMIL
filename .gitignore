@@ -22,3 +22,7 @@ hyperparameter_results_PFOS.csv
 
 # Obsidian research notes
 Research/
+
+# Nested LOBO test outputs
+nested_*_test/
+nested_test_output/
