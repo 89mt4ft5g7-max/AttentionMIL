@@ -132,7 +132,8 @@ if __name__ == "__main__":
                                     lr=lr,
                                     hidden_dim=hidden,
                                     attention_dim=attention,
-                                    weight_decay=wd  
+                                    weight_decay=wd,
+                                    dropout=dropout
                                 )
                           
                                 results["MAE"].append(result["MAE"])
