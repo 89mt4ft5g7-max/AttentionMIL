@@ -14,6 +14,16 @@ from datasetpfos import PFASDataset
 from modelpfos import AttentionMIL
 
 
+PARAMETER_NAMES = (
+    "Hidden",
+    "Attention",
+    "LearningRate",
+    "Epoch",
+    "WeightDecay",
+    "Dropout",
+)
+
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -200,39 +210,15 @@ def evaluate_inner_condition(
     }
 
 
-def select_best_params(
+def evaluate_grid(
     outer_test_bag,
     outer_train_bags,
-    hidden_list,
-    attention_list,
-    lr_list,
-    epoch_list,
-    weight_decay_list,
-    dropout_list,
+    candidates,
     inner_seeds,
 ):
-    best_result = None
-    all_results = []
+    results = []
 
-    search_space = product(
-        hidden_list,
-        attention_list,
-        lr_list,
-        epoch_list,
-        weight_decay_list,
-        dropout_list,
-    )
-
-    for hidden, attention, lr, epoch, weight_decay, dropout in search_space:
-        params = {
-            "Hidden": hidden,
-            "Attention": attention,
-            "LearningRate": lr,
-            "Epoch": epoch,
-            "WeightDecay": weight_decay,
-            "Dropout": dropout,
-        }
-
+    for params in candidates:
         inner_result = evaluate_inner_condition(
             outer_test_bag=outer_test_bag,
             outer_train_bags=outer_train_bags,
@@ -240,37 +226,97 @@ def select_best_params(
             inner_seeds=inner_seeds,
         )
         candidate = {**params, **inner_result}
-        all_results.append({"OuterTestBag": outer_test_bag, **candidate})
+        results.append({"OuterTestBag": outer_test_bag, **candidate})
 
-        if best_result is None:
-            best_result = candidate
-            continue
+    return results
 
-        candidate_key = (
-            candidate["InnerCVScore"],
-            candidate["Inner_R2_Mean"],
-            -candidate["Inner_RMSE_Mean"],
-            -candidate["Hidden"],
-            -candidate["Attention"],
-        )
-        best_key = (
-            best_result["InnerCVScore"],
-            best_result["Inner_R2_Mean"],
-            -best_result["Inner_RMSE_Mean"],
-            -best_result["Hidden"],
-            -best_result["Attention"],
-        )
 
-        if candidate_key > best_key:
-            best_result = candidate
+def result_sort_key(result):
+    return (
+        result["InnerCVScore"],
+        result["Inner_R2_Mean"],
+        -result["Inner_RMSE_Mean"],
+        -result["Hidden"],
+        -result["Attention"],
+    )
 
-    return best_result, all_results
+
+def grid_candidates(grid):
+    return [
+        dict(zip(PARAMETER_NAMES, values))
+        for values in product(*(grid[name] for name in PARAMETER_NAMES))
+    ]
+
+
+def neighboring_values(master_values, center):
+    values = sorted(set(master_values))
+    assert center in values
+
+    center_index = values.index(center)
+    lower_index = max(0, center_index - 1)
+    upper_index = min(len(values), center_index + 2)
+    return values[lower_index:upper_index]
+
+
+def generate_fine_candidates(top_results, fine_master_grid):
+    unique_candidates = {}
+
+    for result in top_results:
+        local_grid = {
+            name: neighboring_values(fine_master_grid[name], result[name])
+            for name in PARAMETER_NAMES
+        }
+
+        for candidate in grid_candidates(local_grid):
+            key = tuple(candidate[name] for name in PARAMETER_NAMES)
+            unique_candidates[key] = candidate
+
+    return list(unique_candidates.values())
+
+
+def coarse_to_fine_search(
+    outer_test_bag,
+    outer_train_bags,
+    coarse_grid,
+    fine_master_grid,
+    refine_top_k,
+    inner_seeds,
+):
+    stage1_results = evaluate_grid(
+        outer_test_bag=outer_test_bag,
+        outer_train_bags=outer_train_bags,
+        candidates=grid_candidates(coarse_grid),
+        inner_seeds=inner_seeds,
+    )
+    ranked_stage1 = sorted(stage1_results, key=result_sort_key, reverse=True)
+    top_results = ranked_stage1[: min(refine_top_k, len(ranked_stage1))]
+
+    fine_candidates = generate_fine_candidates(top_results, fine_master_grid)
+    print(
+        "Inner探索開始: Stage 2 Fine Grid Search "
+        f"({len(fine_candidates)} candidates)"
+    )
+    stage2_results = evaluate_grid(
+        outer_test_bag=outer_test_bag,
+        outer_train_bags=outer_train_bags,
+        candidates=fine_candidates,
+        inner_seeds=inner_seeds,
+    )
+    ranked_stage2 = sorted(stage2_results, key=result_sort_key, reverse=True)
+    best_result = {
+        key: value
+        for key, value in ranked_stage2[0].items()
+        if key != "OuterTestBag"
+    }
+
+    return best_result, ranked_stage1, ranked_stage2
 
 
 def save_results(
     outer_predictions,
     selected_params,
-    inner_results,
+    stage1_results,
+    stage2_results,
     bag_metrics,
     output_dir,
 ):
@@ -278,7 +324,8 @@ def save_results(
 
     predictions_df = pd.DataFrame(outer_predictions)
     selected_df = pd.DataFrame(selected_params)
-    inner_results_df = pd.DataFrame(inner_results)
+    stage1_results_df = pd.DataFrame(stage1_results)
+    stage2_results_df = pd.DataFrame(stage2_results)
     bag_metrics_df = pd.DataFrame(bag_metrics)
 
     predictions_df.to_csv(
@@ -291,8 +338,18 @@ def save_results(
         index=False,
         encoding="utf-8-sig",
     )
-    inner_results_df.to_csv(
+    stage2_results_df.to_csv(
         os.path.join(output_dir, "nested_inner_results_PFOS.csv"),
+        index=False,
+        encoding="utf-8-sig",
+    )
+    stage1_results_df.to_csv(
+        os.path.join(output_dir, "nested_inner_stage1_results_PFOS.csv"),
+        index=False,
+        encoding="utf-8-sig",
+    )
+    stage2_results_df.to_csv(
+        os.path.join(output_dir, "nested_inner_stage2_results_PFOS.csv"),
         index=False,
         encoding="utf-8-sig",
     )
@@ -379,32 +436,38 @@ def save_results(
     )
 
 
+def default_coarse_grid():
+    return {
+        "Hidden": config.HIDDEN_LIST,
+        "Attention": config.ATTENTION_LIST,
+        "LearningRate": config.LR_LIST,
+        "Epoch": config.EPOCH_LIST,
+        "WeightDecay": config.WEIGHT_DECAY_LIST,
+        "Dropout": config.DROPOUT_LIST,
+    }
+
+
+def normalize_grid(grid):
+    normalized = {name: list(grid[name]) for name in PARAMETER_NAMES}
+    assert all(normalized[name] for name in PARAMETER_NAMES)
+    return normalized
+
+
 def run_nested_lobo(
-    hidden_list=None,
-    attention_list=None,
-    lr_list=None,
-    epoch_list=None,
-    weight_decay_list=None,
-    dropout_list=None,
+    coarse_grid=None,
+    fine_master_grid=None,
+    refine_top_k=3,
     inner_seeds=None,
     outer_seeds=None,
     outer_test_bags=None,
     all_bags=None,
     output_dir=".",
 ):
-    hidden_list = list(config.HIDDEN_LIST if hidden_list is None else hidden_list)
-    attention_list = list(
-        config.ATTENTION_LIST if attention_list is None else attention_list
+    coarse_grid = normalize_grid(
+        default_coarse_grid() if coarse_grid is None else coarse_grid
     )
-    lr_list = list(config.LR_LIST if lr_list is None else lr_list)
-    epoch_list = list(config.EPOCH_LIST if epoch_list is None else epoch_list)
-    weight_decay_list = list(
-        config.WEIGHT_DECAY_LIST
-        if weight_decay_list is None
-        else weight_decay_list
-    )
-    dropout_list = list(
-        config.DROPOUT_LIST if dropout_list is None else dropout_list
+    fine_master_grid = normalize_grid(
+        coarse_grid if fine_master_grid is None else fine_master_grid
     )
     inner_seeds = list(config.SEEDS if inner_seeds is None else inner_seeds)
     outer_seeds = list(config.SEEDS if outer_seeds is None else outer_seeds)
@@ -413,12 +476,9 @@ def run_nested_lobo(
         all_bags if outer_test_bags is None else outer_test_bags
     )
 
-    assert hidden_list
-    assert attention_list
-    assert lr_list
-    assert epoch_list
-    assert weight_decay_list
-    assert dropout_list
+    assert refine_top_k >= 1
+    for name in PARAMETER_NAMES:
+        assert set(coarse_grid[name]).issubset(set(fine_master_grid[name]))
     assert inner_seeds
     assert outer_seeds
     assert outer_test_bags
@@ -426,7 +486,8 @@ def run_nested_lobo(
 
     outer_predictions = []
     selected_params = []
-    inner_results = []
+    stage1_results = []
+    stage2_results = []
     bag_metrics = []
 
     for outer_test_bag in outer_test_bags:
@@ -434,20 +495,18 @@ def run_nested_lobo(
         assert outer_test_bag not in outer_train_bags
 
         print(f"\nOuter Test Bag: {outer_test_bag}")
-        print("Inner探索開始")
+        print("Inner探索開始: Stage 1 Coarse Grid Search")
 
-        best, outer_inner_results = select_best_params(
+        best, outer_stage1_results, outer_stage2_results = coarse_to_fine_search(
             outer_test_bag=outer_test_bag,
             outer_train_bags=outer_train_bags,
-            hidden_list=hidden_list,
-            attention_list=attention_list,
-            lr_list=lr_list,
-            epoch_list=epoch_list,
-            weight_decay_list=weight_decay_list,
-            dropout_list=dropout_list,
+            coarse_grid=coarse_grid,
+            fine_master_grid=fine_master_grid,
+            refine_top_k=refine_top_k,
             inner_seeds=inner_seeds,
         )
-        inner_results.extend(outer_inner_results)
+        stage1_results.extend(outer_stage1_results)
+        stage2_results.extend(outer_stage2_results)
 
         selected_row = {"TestBag": outer_test_bag, **best}
         selected_params.append(selected_row)
@@ -514,7 +573,8 @@ def run_nested_lobo(
     save_results(
         outer_predictions=outer_predictions,
         selected_params=selected_params,
-        inner_results=inner_results,
+        stage1_results=stage1_results,
+        stage2_results=stage2_results,
         bag_metrics=bag_metrics,
         output_dir=output_dir,
     )
