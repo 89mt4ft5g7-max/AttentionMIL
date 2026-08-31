@@ -258,12 +258,17 @@ def neighboring_values(master_values, center):
     return values[lower_index:upper_index]
 
 
-def generate_fine_candidates(top_results, fine_master_grid):
+def generate_fine_candidates(top_results, fine_master_grid, refine_keys):
     unique_candidates = {}
+    refine_keys = set(refine_keys)
 
     for result in top_results:
         local_grid = {
-            name: neighboring_values(fine_master_grid[name], result[name])
+            name: (
+                neighboring_values(fine_master_grid[name], result[name])
+                if name in refine_keys
+                else [result[name]]
+            )
             for name in PARAMETER_NAMES
         }
 
@@ -280,6 +285,7 @@ def coarse_to_fine_search(
     coarse_grid,
     fine_master_grid,
     refine_top_k,
+    refine_keys,
     inner_seeds,
 ):
     stage1_results = evaluate_grid(
@@ -291,7 +297,11 @@ def coarse_to_fine_search(
     ranked_stage1 = sorted(stage1_results, key=result_sort_key, reverse=True)
     top_results = ranked_stage1[: min(refine_top_k, len(ranked_stage1))]
 
-    fine_candidates = generate_fine_candidates(top_results, fine_master_grid)
+    fine_candidates = generate_fine_candidates(
+        top_results,
+        fine_master_grid,
+        refine_keys,
+    )
     print(
         "Inner探索開始: Stage 2 Fine Grid Search "
         f"({len(fine_candidates)} candidates)"
@@ -457,6 +467,7 @@ def run_nested_lobo(
     coarse_grid=None,
     fine_master_grid=None,
     refine_top_k=3,
+    refine_keys=None,
     inner_seeds=None,
     outer_seeds=None,
     outer_test_bags=None,
@@ -469,6 +480,15 @@ def run_nested_lobo(
     fine_master_grid = normalize_grid(
         coarse_grid if fine_master_grid is None else fine_master_grid
     )
+    refine_keys = list(PARAMETER_NAMES if refine_keys is None else refine_keys)
+    invalid_refine_keys = [
+        name for name in refine_keys if name not in PARAMETER_NAMES
+    ]
+    if invalid_refine_keys:
+        raise ValueError(
+            "Invalid refine_keys: "
+            f"{invalid_refine_keys}. Allowed keys: {list(PARAMETER_NAMES)}"
+        )
     inner_seeds = list(config.SEEDS if inner_seeds is None else inner_seeds)
     outer_seeds = list(config.SEEDS if outer_seeds is None else outer_seeds)
     all_bags = list(config.TEST_BAGS if all_bags is None else all_bags)
@@ -503,6 +523,7 @@ def run_nested_lobo(
             coarse_grid=coarse_grid,
             fine_master_grid=fine_master_grid,
             refine_top_k=refine_top_k,
+            refine_keys=refine_keys,
             inner_seeds=inner_seeds,
         )
         stage1_results.extend(outer_stage1_results)
