@@ -143,11 +143,11 @@ def evaluate_inner_condition(
     outer_test_bag,
     outer_train_bags,
     params,
-    seeds,
+    inner_seeds,
 ):
     seed_metrics = []
 
-    for seed in seeds:
+    for seed in inner_seeds:
         seed_predictions = []
 
         for inner_val_bag in outer_train_bags:
@@ -209,7 +209,7 @@ def select_best_params(
     epoch_list,
     weight_decay_list,
     dropout_list,
-    seeds,
+    inner_seeds,
 ):
     best_result = None
     all_results = []
@@ -237,7 +237,7 @@ def select_best_params(
             outer_test_bag=outer_test_bag,
             outer_train_bags=outer_train_bags,
             params=params,
-            seeds=seeds,
+            inner_seeds=inner_seeds,
         )
         candidate = {**params, **inner_result}
         all_results.append({"OuterTestBag": outer_test_bag, **candidate})
@@ -386,7 +386,8 @@ def run_nested_lobo(
     epoch_list=None,
     weight_decay_list=None,
     dropout_list=None,
-    seeds=None,
+    inner_seeds=None,
+    outer_seeds=None,
     outer_test_bags=None,
     all_bags=None,
     output_dir=".",
@@ -405,7 +406,8 @@ def run_nested_lobo(
     dropout_list = list(
         config.DROPOUT_LIST if dropout_list is None else dropout_list
     )
-    seeds = list(config.SEEDS if seeds is None else seeds)
+    inner_seeds = list(config.SEEDS if inner_seeds is None else inner_seeds)
+    outer_seeds = list(config.SEEDS if outer_seeds is None else outer_seeds)
     all_bags = list(config.TEST_BAGS if all_bags is None else all_bags)
     outer_test_bags = list(
         all_bags if outer_test_bags is None else outer_test_bags
@@ -417,7 +419,8 @@ def run_nested_lobo(
     assert epoch_list
     assert weight_decay_list
     assert dropout_list
-    assert seeds
+    assert inner_seeds
+    assert outer_seeds
     assert outer_test_bags
     assert set(outer_test_bags).issubset(set(all_bags))
 
@@ -442,7 +445,7 @@ def run_nested_lobo(
             epoch_list=epoch_list,
             weight_decay_list=weight_decay_list,
             dropout_list=dropout_list,
-            seeds=seeds,
+            inner_seeds=inner_seeds,
         )
         inner_results.extend(outer_inner_results)
 
@@ -460,7 +463,7 @@ def run_nested_lobo(
             f"InnerCVScore={best['InnerCVScore']:.6f}"
         )
 
-        for seed in seeds:
+        for seed in outer_seeds:
             seed_predictions = train_and_predict(
                 train_bags=outer_train_bags,
                 eval_bag=outer_test_bag,
@@ -505,7 +508,7 @@ def run_nested_lobo(
 
         print(
             f"Outer予測完了: Bag={outer_test_bag}, "
-            f"Samples={len(seed_predictions)}, Seeds={len(seeds)}"
+            f"Samples={len(seed_predictions)}, Seeds={len(outer_seeds)}"
         )
 
     save_results(
