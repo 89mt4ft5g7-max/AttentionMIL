@@ -1,4 +1,5 @@
 import os
+import json
 import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
@@ -496,6 +497,123 @@ def save_results(
     )
 
 
+def atomic_write_csv(rows, path):
+    """Write a CSV completely before atomically replacing its destination."""
+    temporary_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        pd.DataFrame(rows).to_csv(
+            temporary_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+
+def atomic_write_json(data, path):
+    """Write a JSON file completely before atomically replacing it."""
+    temporary_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+
+def checkpoint_paths(output_dir, outer_test_bag):
+    prefix = os.path.join(output_dir, f"checkpoint_bag_{outer_test_bag}")
+    return {
+        "stage1": f"{prefix}_stage1.csv",
+        "stage2": f"{prefix}_stage2.csv",
+        "selected": f"{prefix}_selected.csv",
+        "predictions": f"{prefix}_predictions.csv",
+        "bag_metrics": f"{prefix}_bag_metrics.csv",
+        "complete": f"{prefix}_complete.json",
+    }
+
+
+def save_bag_checkpoint(
+    outer_test_bag,
+    stage1_results,
+    stage2_results,
+    selected_params,
+    outer_predictions,
+    bag_metrics,
+    output_dir,
+):
+    """Persist one fully evaluated Outer Bag; create its marker last."""
+    paths = checkpoint_paths(output_dir, outer_test_bag)
+    checkpoint_rows = {
+        "stage1": stage1_results,
+        "stage2": stage2_results,
+        "selected": selected_params,
+        "predictions": outer_predictions,
+        "bag_metrics": bag_metrics,
+    }
+
+    for name, rows in checkpoint_rows.items():
+        atomic_write_csv(rows, paths[name])
+
+    atomic_write_json(
+        {
+            "OuterTestBag": outer_test_bag,
+            "files": {
+                name: os.path.basename(paths[name])
+                for name in checkpoint_rows
+            },
+            "row_counts": {
+                name: len(rows) for name, rows in checkpoint_rows.items()
+            },
+        },
+        paths["complete"],
+    )
+
+
+def load_bag_checkpoint(output_dir, outer_test_bag):
+    """Load a Bag only when its last-written completion marker is valid."""
+    paths = checkpoint_paths(output_dir, outer_test_bag)
+    if not os.path.isfile(paths["complete"]):
+        return None
+
+    try:
+        with open(paths["complete"], encoding="utf-8") as file:
+            marker = json.load(file)
+        if marker.get("OuterTestBag") != outer_test_bag:
+            return None
+
+        loaded = {}
+        for name in (
+            "stage1",
+            "stage2",
+            "selected",
+            "predictions",
+            "bag_metrics",
+        ):
+            if not os.path.isfile(paths[name]):
+                return None
+            frame = pd.read_csv(paths[name])
+            if len(frame) != marker.get("row_counts", {}).get(name):
+                return None
+            loaded[name] = frame.to_dict("records")
+    except (OSError, ValueError, pd.errors.ParserError):
+        return None
+
+    return loaded
+
+
+def invalidate_bag_checkpoint(output_dir, outer_test_bag):
+    """Remove only the completion marker before recalculating a Bag."""
+    complete_path = checkpoint_paths(output_dir, outer_test_bag)["complete"]
+    if os.path.exists(complete_path):
+        os.remove(complete_path)
+
+
 def default_coarse_grid():
     return {
         "Hidden": config.HIDDEN_LIST,
@@ -524,7 +642,10 @@ def run_nested_lobo(
     all_bags=None,
     output_dir=".",
     n_jobs=1,
+    resume=False,
 ):
+    os.makedirs(output_dir, exist_ok=True)
+
     coarse_grid = normalize_grid(
         default_coarse_grid() if coarse_grid is None else coarse_grid
     )
@@ -564,6 +685,22 @@ def run_nested_lobo(
     bag_metrics = []
 
     for outer_test_bag in outer_test_bags:
+        if resume:
+            checkpoint = load_bag_checkpoint(output_dir, outer_test_bag)
+            if checkpoint is not None:
+                stage1_results.extend(checkpoint["stage1"])
+                stage2_results.extend(checkpoint["stage2"])
+                selected_params.extend(checkpoint["selected"])
+                outer_predictions.extend(checkpoint["predictions"])
+                bag_metrics.extend(checkpoint["bag_metrics"])
+                print(
+                    f"\nOuter Test Bag: {outer_test_bag} "
+                    "(checkpoint完了済みのためskip)"
+                )
+                continue
+
+        invalidate_bag_checkpoint(output_dir, outer_test_bag)
+
         outer_train_bags = [bag for bag in all_bags if bag != outer_test_bag]
         assert outer_test_bag not in outer_train_bags
 
@@ -580,11 +717,10 @@ def run_nested_lobo(
             inner_seeds=inner_seeds,
             n_jobs=n_jobs,
         )
-        stage1_results.extend(outer_stage1_results)
-        stage2_results.extend(outer_stage2_results)
-
         selected_row = {"TestBag": outer_test_bag, **best}
-        selected_params.append(selected_row)
+        outer_selected_params = [selected_row]
+        outer_predictions_for_bag = []
+        outer_bag_metrics = []
 
         print(
             "選択された最良条件: "
@@ -611,7 +747,7 @@ def run_nested_lobo(
             )
 
             for row in seed_predictions:
-                outer_predictions.append(
+                outer_predictions_for_bag.append(
                     {
                         "TestBag": outer_test_bag,
                         **row,
@@ -630,7 +766,7 @@ def run_nested_lobo(
                 [row["True"] for row in seed_predictions],
                 [row["Pred"] for row in seed_predictions],
             )
-            bag_metrics.append(
+            outer_bag_metrics.append(
                 {
                     "TestBag": outer_test_bag,
                     "Seed": seed,
@@ -644,6 +780,22 @@ def run_nested_lobo(
             f"Outer予測完了: Bag={outer_test_bag}, "
             f"Samples={len(seed_predictions)}, Seeds={len(outer_seeds)}"
         )
+
+        save_bag_checkpoint(
+            outer_test_bag=outer_test_bag,
+            stage1_results=outer_stage1_results,
+            stage2_results=outer_stage2_results,
+            selected_params=outer_selected_params,
+            outer_predictions=outer_predictions_for_bag,
+            bag_metrics=outer_bag_metrics,
+            output_dir=output_dir,
+        )
+
+        stage1_results.extend(outer_stage1_results)
+        stage2_results.extend(outer_stage2_results)
+        selected_params.extend(outer_selected_params)
+        outer_predictions.extend(outer_predictions_for_bag)
+        bag_metrics.extend(outer_bag_metrics)
 
     save_results(
         outer_predictions=outer_predictions,

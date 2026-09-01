@@ -53,6 +53,7 @@ def main():
         output_dir="nested_production_PFOS",
 
         n_jobs=4,
+        resume=True,
     )
 
 
