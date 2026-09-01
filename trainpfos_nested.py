@@ -1,5 +1,6 @@
 import os
 import random
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
 
 import numpy as np
@@ -210,23 +211,69 @@ def evaluate_inner_condition(
     }
 
 
+def initialize_grid_worker():
+    """Limit PyTorch thread pools inside each grid-search worker."""
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        # PyTorch only permits setting inter-op threads before parallel work
+        # starts. In that case, keep the existing inter-op thread setting.
+        pass
+
+
+def evaluate_grid_candidate(
+    outer_test_bag,
+    outer_train_bags,
+    params,
+    inner_seeds,
+):
+    """Evaluate one hyperparameter candidate across all inner folds/seeds."""
+    inner_result = evaluate_inner_condition(
+        outer_test_bag=outer_test_bag,
+        outer_train_bags=outer_train_bags,
+        params=params,
+        inner_seeds=inner_seeds,
+    )
+    candidate = {**params, **inner_result}
+    return {"OuterTestBag": outer_test_bag, **candidate}
+
+
 def evaluate_grid(
     outer_test_bag,
     outer_train_bags,
     candidates,
     inner_seeds,
+    n_jobs=1,
 ):
-    results = []
+    if n_jobs == 1:
+        return [
+            evaluate_grid_candidate(
+                outer_test_bag=outer_test_bag,
+                outer_train_bags=outer_train_bags,
+                params=params,
+                inner_seeds=inner_seeds,
+            )
+            for params in candidates
+        ]
 
-    for params in candidates:
-        inner_result = evaluate_inner_condition(
-            outer_test_bag=outer_test_bag,
-            outer_train_bags=outer_train_bags,
-            params=params,
-            inner_seeds=inner_seeds,
-        )
-        candidate = {**params, **inner_result}
-        results.append({"OuterTestBag": outer_test_bag, **candidate})
+    results = [None] * len(candidates)
+    with ProcessPoolExecutor(
+        max_workers=n_jobs,
+        initializer=initialize_grid_worker,
+    ) as executor:
+        future_to_index = {
+            executor.submit(
+                evaluate_grid_candidate,
+                outer_test_bag,
+                outer_train_bags,
+                params,
+                inner_seeds,
+            ): index
+            for index, params in enumerate(candidates)
+        }
+        for future in as_completed(future_to_index):
+            results[future_to_index[future]] = future.result()
 
     return results
 
@@ -287,12 +334,14 @@ def coarse_to_fine_search(
     refine_top_k,
     refine_keys,
     inner_seeds,
+    n_jobs,
 ):
     stage1_results = evaluate_grid(
         outer_test_bag=outer_test_bag,
         outer_train_bags=outer_train_bags,
         candidates=grid_candidates(coarse_grid),
         inner_seeds=inner_seeds,
+        n_jobs=n_jobs,
     )
     ranked_stage1 = sorted(stage1_results, key=result_sort_key, reverse=True)
     top_results = ranked_stage1[: min(refine_top_k, len(ranked_stage1))]
@@ -311,6 +360,7 @@ def coarse_to_fine_search(
         outer_train_bags=outer_train_bags,
         candidates=fine_candidates,
         inner_seeds=inner_seeds,
+        n_jobs=n_jobs,
     )
     ranked_stage2 = sorted(stage2_results, key=result_sort_key, reverse=True)
     best_result = {
@@ -473,6 +523,7 @@ def run_nested_lobo(
     outer_test_bags=None,
     all_bags=None,
     output_dir=".",
+    n_jobs=1,
 ):
     coarse_grid = normalize_grid(
         default_coarse_grid() if coarse_grid is None else coarse_grid
@@ -497,6 +548,8 @@ def run_nested_lobo(
     )
 
     assert refine_top_k >= 1
+    if not isinstance(n_jobs, int) or isinstance(n_jobs, bool) or n_jobs < 1:
+        raise ValueError("n_jobs must be a positive integer")
     for name in PARAMETER_NAMES:
         assert set(coarse_grid[name]).issubset(set(fine_master_grid[name]))
     assert inner_seeds
@@ -525,6 +578,7 @@ def run_nested_lobo(
             refine_top_k=refine_top_k,
             refine_keys=refine_keys,
             inner_seeds=inner_seeds,
+            n_jobs=n_jobs,
         )
         stage1_results.extend(outer_stage1_results)
         stage2_results.extend(outer_stage2_results)
