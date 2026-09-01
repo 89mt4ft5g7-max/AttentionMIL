@@ -32,3 +32,4 @@ parallel_test_jobs4/
 
 # Production output
 nested_production_PFOS/
+nested_production_PFOS.log
