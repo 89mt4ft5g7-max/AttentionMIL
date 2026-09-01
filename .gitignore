@@ -26,3 +26,9 @@ Research/
 # Nested LOBO test outputs
 nested_*_test/
 nested_test_output/
+# Parallel test outputs
+parallel_test_jobs1/
+parallel_test_jobs4/
+
+# Production output
+nested_production_PFOS/
