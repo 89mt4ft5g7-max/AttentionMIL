@@ -24,6 +24,11 @@ class PFASDataset(Dataset):
             "a_住居系", "a_工業系", "a_商業系", "a_不明",
             "b_森林", "b_農地", "b_建物用地", "b_交通", "b_荒地", "b_その他人工利用地",
         ]
+        self.rainfall_cols = [
+            "1日前降水量", "7日間降水量", "30日間降水量",
+        ]
+        self.all_feature_cols = self.feature_cols + self.rainfall_cols
+        self.input_dim = len(self.all_feature_cols)
 
         # dataset.py に合わせた bag番号とCSVファイル名の対応
         self.bag_to_file = {
@@ -40,6 +45,24 @@ class PFASDataset(Dataset):
 
         # ラベル読込 ＆ フィルタリング
         self.label_df = pd.read_csv(label_csv)
+        missing_rainfall_cols = [
+            col for col in self.rainfall_cols if col not in self.label_df.columns
+        ]
+        if missing_rainfall_cols:
+            raise ValueError(
+                f"短期降雨特徴量の列がありません: {missing_rainfall_cols}"
+            )
+
+        self.label_df[self.rainfall_cols] = self.label_df[
+            self.rainfall_cols
+        ].apply(pd.to_numeric, errors="raise")
+        rainfall_nan_counts = self.label_df[self.rainfall_cols].isna().sum()
+        if rainfall_nan_counts.any():
+            raise ValueError(
+                "短期降雨特徴量にNaNがあります: "
+                f"{rainfall_nan_counts[rainfall_nan_counts > 0].to_dict()}"
+            )
+
         self.label_df = self.label_df.dropna(subset=["bag"])
         self.label_df["bag"] = self.label_df["bag"].astype(int)
         self.label_df = self.label_df[
@@ -60,11 +83,7 @@ class PFASDataset(Dataset):
             for _, row in self.label_df.iterrows():
                 bag = row["bag"]
                 df = self.bag_data[bag]
-                x = df[self.feature_cols].values
-
-                rain = np.full((len(df), 1), row["年降水量"])
-                rain_days = np.full((len(df), 1), row["降水日数"])
-                x = np.hstack([x, rain, rain_days])
+                x = self._build_features(df, row)
                 X.append(x)
 
             X = np.vstack(X)
@@ -86,6 +105,14 @@ class PFASDataset(Dataset):
     def __len__(self):
         return len(self.label_df)
 
+    def _build_features(self, df, row):
+        x = df[self.feature_cols].to_numpy(dtype=np.float64)
+        rainfall = np.tile(
+            row[self.rainfall_cols].to_numpy(dtype=np.float64),
+            (len(df), 1),
+        )
+        return np.hstack([x, rainfall])
+
     def __getitem__(self, idx):
         row = self.label_df.iloc[idx]
         bag = row["bag"]
@@ -96,11 +123,7 @@ class PFASDataset(Dataset):
 
         # 特徴量処理（キャッシュから取得）
         df = self.bag_data[bag]
-        x = df[self.feature_cols].values
-
-        rain = np.full((len(df), 1), row["年降水量"])
-        rain_days = np.full((len(df), 1), row["降水日数"])
-        x = np.hstack([x, rain, rain_days])
+        x = self._build_features(df, row)
 
         x = self.scaler.transform(x)
 

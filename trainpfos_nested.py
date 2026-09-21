@@ -74,7 +74,7 @@ def train_and_predict(
     )
 
     model = AttentionMIL(
-        input_dim=config.INPUT_DIM,
+        input_dim=train_dataset.input_dim,
         hidden_dim=hidden_dim,
         attention_dim=attention_dim,
         dropout=dropout,

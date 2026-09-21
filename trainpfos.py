@@ -46,7 +46,7 @@ def run_experiment(seed,
         )
 
         model = AttentionMIL(
-            input_dim=config.INPUT_DIM,  # ← config の値を使用
+            input_dim=train_dataset.input_dim,
             hidden_dim=hidden_dim,
             attention_dim=attention_dim,
             dropout=dropout
