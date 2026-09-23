@@ -26,10 +26,12 @@ Research/
 # Nested LOBO test outputs
 nested_*_test/
 nested_test_output/
-# Parallel test outputs
+nested_coarse_fine_test/
+nested_seed_split_test/
 parallel_test_jobs1/
 parallel_test_jobs4/
-
-# Production output
-nested_production_PFOS/
-nested_production_PFOS.log
+nested_runtime_parallel_test/
+nested_runtime_test/
+nested_refine_keys_test/
+nested_coarse_fine_test/
+nested_seed_split_test/
